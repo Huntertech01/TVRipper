@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 
+import argparse
 import re
 import shlex
 import subprocess
 import sys
-import argparse
 from pathlib import Path
 
 RIP_ROOT = Path("/mnt/Jellyfin/RippedShows")
 TEMP_ROOT = Path("/mnt/Jellyfin/Temp")
 TV_ROOT = Path("/mnt/Jellyfin/Tv Shows")
 
-# Change if your optical drive is not disc:0
 DISC_ID = "disc:0"
-
-# Change this if you want TheTVDB instead
 FILEBOT_DB = "TheMovieDB::TV"
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="DVD ripper pipeline")
-    
     parser.add_argument("--show", type=str, help="Show name")
     parser.add_argument("--season", type=int, help="Season number")
-    
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=3,
+        help="Auto chapter group size per episode (default: 3)"
+    )
+    parser.add_argument(
+        "--junk-threshold",
+        type=int,
+        default=15,
+        help="Ignore final chapter if shorter than this many seconds (default: 15)"
+    )
     return parser.parse_args()
 
 
@@ -63,22 +71,16 @@ def extract_disc_label(info_text):
 
 
 def parse_show_and_disc(label):
-    """
-    Example:
-      ADVENTURE TIME DISC 2
-    """
     m = re.match(r"^(.*?)\s+DISC\s+(\d+)$", label.strip(), re.IGNORECASE)
     if m:
         show_name = normalize_title_case(m.group(1).strip())
         disc_num = int(m.group(2))
         return show_name, disc_num
 
-    # Fallback if DISC ## isn't present
     return normalize_title_case(label.strip()), None
 
 
 def normalize_title_case(name):
-    # Basic cleanup; preserves user override later if desired
     words = name.split()
     return " ".join(w.capitalize() for w in words)
 
@@ -107,15 +109,17 @@ def prompt_int(prompt_text, default=None):
             print("Please enter a whole number.")
 
 
+def prompt_yes_no(prompt_text, default="y"):
+    while True:
+        val = prompt_nonempty(prompt_text, default).strip().lower()
+        if val in ("y", "yes"):
+            return True
+        if val in ("n", "no"):
+            return False
+        print("Please enter y or n.")
+
+
 def parse_chapter_groups(raw):
-    """
-    Accepts:
-      1-3,4-6,7-9
-      1:3,4:6,7:9
-      1-1,2-2,3-3
-    Returns:
-      [(1,3), (4,6), (7,9)]
-    """
     groups = []
     parts = [p.strip() for p in raw.split(",") if p.strip()]
     if not parts:
@@ -124,9 +128,7 @@ def parse_chapter_groups(raw):
     for part in parts:
         m = re.match(r"^(\d+)\s*[-:]\s*(\d+)$", part)
         if not m:
-            raise ValueError(
-                f"Invalid group '{part}'. Use format like 1-3,4-6,7-9"
-            )
+            raise ValueError(f"Invalid group '{part}'. Use format like 1-3,4-6,7-9")
         start = int(m.group(1))
         end = int(m.group(2))
         if end < start:
@@ -152,11 +154,6 @@ def make_dirs(show_name, season_num, disc_num):
 
 
 def rip_disc(rip_dir):
-    """
-    Rip all titles so you can inspect if needed.
-    If you later find the correct title index is always predictable,
-    this can be changed to rip only one title.
-    """
     run_command([
         "makemkvcon",
         "mkv",
@@ -186,6 +183,77 @@ def choose_source_mkv(rip_dir):
     return mkvs[idx]
 
 
+def scan_chapters_with_handbrake(source_mkv):
+    result = run_command([
+        "HandBrakeCLI",
+        "-i", str(source_mkv),
+        "--scan"
+    ], check=False)
+
+    scan_text = (result.stdout or "") + "\n" + (result.stderr or "")
+    chapters = []
+
+    for line in scan_text.splitlines():
+        m = re.search(r"\+\s+(\d+):\s+duration\s+([0-9:]+)", line)
+        if m:
+            chapters.append((int(m.group(1)), m.group(2)))
+
+    return chapters
+
+
+def print_chapter_list(chapters):
+    if not chapters:
+        print("\nNo chapters found from HandBrake scan.")
+        return
+
+    print("\nDetected chapters:")
+    for num, duration in chapters:
+        print(f"  Chapter {num:02d}: {duration}")
+
+    print(f"\nTotal chapters detected: {len(chapters)}")
+
+
+def duration_to_seconds(duration_str):
+    parts = [int(p) for p in duration_str.split(":")]
+    if len(parts) == 3:
+        h, m, s = parts
+        return h * 3600 + m * 60 + s
+    if len(parts) == 2:
+        m, s = parts
+        return m * 60 + s
+    return 0
+
+
+def auto_group_chapters_by_duration(chapters, group_size=3, min_last_chapter_seconds=15):
+    if not chapters:
+        return []
+
+    filtered = list(chapters)
+
+    # Drop very short final chapter as likely junk
+    last_num, last_duration = filtered[-1]
+    if duration_to_seconds(last_duration) < min_last_chapter_seconds:
+        filtered = filtered[:-1]
+
+    if not filtered:
+        return []
+
+    groups = []
+    start = filtered[0][0]
+    max_ch = filtered[-1][0]
+
+    while start + group_size - 1 <= max_ch:
+        end = start + group_size - 1
+        groups.append((start, end))
+        start += group_size
+
+    return groups
+
+
+def chapter_groups_to_text(groups):
+    return ",".join(f"{start}-{end}" for start, end in groups)
+
+
 def encode_episodes(source_mkv, temp_dir, show_name, season_num, first_episode_num, chapter_groups):
     out_files = []
 
@@ -206,9 +274,6 @@ def encode_episodes(source_mkv, temp_dir, show_name, season_num, first_episode_n
 
 
 def rename_and_move_with_filebot(temp_dir, tv_root, show_name):
-    """
-    FileBot will use the SxxEyy numbers in filenames to fetch titles and move files.
-    """
     format_str = "{n}/Season {s.pad(2)}/{n} - {s00e00} - {t}"
 
     run_command([
@@ -223,6 +288,37 @@ def rename_and_move_with_filebot(temp_dir, tv_root, show_name):
     ])
 
 
+def get_chapter_groups_from_user_or_auto(source_mkv, state, args):
+    chapters = scan_chapters_with_handbrake(source_mkv)
+    print_chapter_list(chapters)
+
+    auto_groups = auto_group_chapters_by_duration(
+        chapters,
+        group_size=args.group_size,
+        min_last_chapter_seconds=args.junk_threshold
+    )
+    auto_text = chapter_groups_to_text(auto_groups)
+
+    if auto_text:
+        print(f"\nSuggested chapter groups: {auto_text}")
+
+    previous = state.get("chapter_text")
+
+    if previous:
+        if prompt_yes_no(f"Reuse previous chapter groups [{previous}]? (y/n)", "y"):
+            return previous, parse_chapter_groups(previous)
+
+    if auto_text:
+        if prompt_yes_no("Use suggested chapter groups? (y/n)", "y"):
+            return auto_text, auto_groups
+
+    max_ch = chapters[-1][0] if chapters else "unknown"
+    chapter_text = prompt_nonempty(
+        f"Chapter groups (1-{max_ch}, example: 1-3,4-6,7-9)"
+    )
+    return chapter_text, parse_chapter_groups(chapter_text)
+
+
 def process_disc(state, args):
     print("Detecting disc...")
     info = get_disc_info()
@@ -232,35 +328,42 @@ def process_disc(state, args):
     print(f"Detected device: {device}")
 
     detected_show, detected_disc = parse_show_and_disc(detected_label)
-    
-    # Show Name
+
     show_name = (
         args.show
         or state.get("show_name")
         or prompt_nonempty("Show name", detected_show)
-
     )
-    
-    # Season
+
     season_num = (
         args.season
         or state.get("season_num")
-        or prompt_int("Season # loaded in tray")
+        or prompt_int("Season number loaded in tray")
     )
-    # Disc
+
     disc_num = prompt_int(
         "Disc number",
         detected_disc if detected_disc is not None else None
     )
-    #Chapter Groups
-    chapter_text = state.get("chapter_text")
-    if not chapter_text:
-        chapter_text = prompt_nonempty(
-            "Chapter groups (example: 1-3,4-6,7-9)"
-        )
-    chapter_groups = parse_chapter_groups(chapter_text)
-    
-    #Episode Numbering
+
+    rip_dir, temp_dir, tv_dir = make_dirs(show_name, season_num, disc_num)
+
+    print(f"\nRip directory:  {rip_dir}")
+    print(f"Temp directory: {temp_dir}")
+    print(f"TV directory:   {tv_dir}")
+
+    confirm = prompt_yes_no("Start rip? (y/n)", "y")
+    if not confirm:
+        print("Cancelled.")
+        return
+
+    rip_disc(rip_dir)
+    source_mkv = choose_source_mkv(rip_dir)
+
+    print(f"\nSelected source MKV: {source_mkv}")
+
+    chapter_text, chapter_groups = get_chapter_groups_from_user_or_auto(source_mkv, state, args)
+
     first_episode_num = prompt_int(
         "First episode number on this disc",
         state.get("next_episode")
@@ -271,21 +374,11 @@ def process_disc(state, args):
         ep = first_episode_num + i
         print(f"  S{season_num:02d}E{ep:02d} <- chapters {start_ch}-{end_ch}")
 
-    confirm = prompt_nonempty("Continue? (y/n)", "y").lower()
-    if confirm not in ("y", "yes"):
+    confirm = prompt_yes_no("Continue to encode and rename? (y/n)", "y")
+    if not confirm:
         print("Cancelled.")
         return
 
-    rip_dir, temp_dir, tv_dir = make_dirs(show_name, season_num, disc_num)
-
-    print(f"\nRip directory:  {rip_dir}")
-    print(f"Temp directory: {temp_dir}")
-    print(f"TV directory:   {tv_dir}")
-
-    rip_disc(rip_dir)
-    source_mkv = choose_source_mkv(rip_dir)
-
-    print(f"\nSelected source MKV: {source_mkv}")
     encode_episodes(
         source_mkv=source_mkv,
         temp_dir=temp_dir,
@@ -296,14 +389,14 @@ def process_disc(state, args):
     )
 
     rename_and_move_with_filebot(temp_dir, TV_ROOT, show_name)
-    
-    # Save state for next disc
+
     state["show_name"] = show_name
     state["season_num"] = season_num
     state["chapter_text"] = chapter_text
     state["next_episode"] = first_episode_num + len(chapter_groups)
 
     print("\nDone.")
+
 
 def main():
     args = parse_args()
@@ -323,7 +416,7 @@ def main():
         except Exception as e:
             print(f"\nError: {e}")
             print("Continuing to next disc...")
-                
-                
+
+
 if __name__ == "__main__":
     main()
