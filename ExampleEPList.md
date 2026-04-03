@@ -1,0 +1,10 @@
+Season 1
+	Disc 1
+		[Episode Names]
+	Disc 2
+		[Episode Names]
+Season 2
+	Disc 1
+		[Episode Names]
+	Disc 2
+		[Episode Names]
