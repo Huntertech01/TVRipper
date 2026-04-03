@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("--reset-config", action="store_true", help="Reset saved directory configuration")
     return parser.parse_args()
 
-ddef load_or_create_config(reset=False):
+def load_or_create_config(reset=False):
     if CONFIG_FILE.exists() and not reset:
         with open(CONFIG_FILE, "r") as f:
             data = json.load(f)
@@ -162,18 +162,18 @@ def parse_chapter_groups(raw):
 
 
 def make_dirs(show_name, season_num, disc_num, config):
-season_label = f"Season {season_num:02d}"
-disc_label = f"Disc {disc_num:02d}"
+	season_label = f"Season {season_num:02d}"
+	disc_label = f"Disc {disc_num:02d}"
 
-rip_dir = config["rip_root"] / show_name / season_label / disc_label
-temp_dir = config["temp_root"] / show_name / season_label / disc_label
-tv_dir = config["tv_root"] / show_name
+	rip_dir = config["rip_root"] / show_name / season_label / disc_label
+	temp_dir = config["temp_root"] / show_name / season_label / disc_label
+	tv_dir = config["tv_root"] / show_name
 
-rip_dir.mkdir(parents=True, exist_ok=True)
-temp_dir.mkdir(parents=True, exist_ok=True)
-tv_dir.mkdir(parents=True, exist_ok=True)
+	rip_dir.mkdir(parents=True, exist_ok=True)
+	temp_dir.mkdir(parents=True, exist_ok=True)
+	tv_dir.mkdir(parents=True, exist_ok=True)
 
-return rip_dir, temp_dir, tv_dir
+	return rip_dir, temp_dir, tv_dir
 
 
 def find_existing_mkvs(rip_dir):
