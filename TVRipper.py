@@ -661,7 +661,7 @@ def process_disc(state, args, config):
             "HandBrakeCLI",
             "-i", str(source_mkv),
             "-o", str(out_file),
-            "--chapters", f"{ch_start}:{ch_end}"
+            "--chapters", f"{ch_start}-{ch_end}"
         ])
 
         encoded_files.append({
