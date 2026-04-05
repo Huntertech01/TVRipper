@@ -521,7 +521,7 @@ def encode_episodes(source_mkv, temp_dir, show_name, mapped_episodes, chapter_gr
             "HandBrakeCLI",
             "-i", str(source_mkv),
             "-o", str(out_file),
-            "--chapters", f"{ch_start}:{ch_end}"
+            "--chapters", f"{ch_start}-{ch_end}"
         ])
 
         encoded.append({
