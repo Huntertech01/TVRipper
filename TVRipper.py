@@ -162,18 +162,18 @@ def parse_chapter_groups(raw):
 
 
 def make_dirs(show_name, season_num, disc_num, config):
-	season_label = f"Season {season_num:02d}"
-	disc_label = f"Disc {disc_num:02d}"
+    season_label = f"Season {season_num:02d}"
+    disc_label = f"Disc {disc_num:02d}"
 
-	rip_dir = config["rip_root"] / show_name / season_label / disc_label
-	temp_dir = config["temp_root"] / show_name / season_label / disc_label
-	tv_dir = config["tv_root"] / show_name
+    rip_dir = config["rip_root"] / show_name / season_label / disc_label
+    temp_dir = config["temp_root"] / show_name / season_label / disc_label
+    tv_dir = config["tv_root"] / show_name
 
-	rip_dir.mkdir(parents=True, exist_ok=True)
-	temp_dir.mkdir(parents=True, exist_ok=True)
-	tv_dir.mkdir(parents=True, exist_ok=True)
+    rip_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    tv_dir.mkdir(parents=True, exist_ok=True)
 
-	return rip_dir, temp_dir, tv_dir
+    return rip_dir, temp_dir, tv_dir
 
 
 def find_existing_mkvs(rip_dir):
@@ -647,13 +647,29 @@ def process_disc(state, args, config):
         print("Cancelled.")
         return
 
-    encoded_files = encode_episodes(
-        source_mkv=source_mkv,
-        temp_dir=temp_dir,
-        show_name=show_name,
-        mapped_episodes=mapped_episodes,
-        chapter_groups=chapter_groups
-    )
+    encoded_files = []
+
+    for group_idx, ((ch_start, ch_end), ep_info) in enumerate(zip(chapter_groups, mapped_episodes)):
+        season_num = ep_info["season"]
+        episode_num = ep_info["episode"]
+        title = ep_info["tmdb_title"]
+
+        out_name = f"{show_name} - S{season_num:02d}E{episode_num:02d} - {safe_filename(title)}.mkv"
+        out_file = temp_dir / out_name
+
+        run_command([
+            "HandBrakeCLI",
+            "-i", str(source_mkv),
+            "-o", str(out_file),
+            "--chapters", f"{ch_start}:{ch_end}"
+        ])
+
+        encoded_files.append({
+            "path": out_file,
+            "season": season_num,
+            "episode": episode_num,
+            "title": title,
+        })
 
     moved_files = move_encoded_files_to_tv(encoded_files, show_name, config)
 
